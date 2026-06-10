@@ -84,8 +84,12 @@ You can also use voice (🎤) and screen sharing (the chat sends a frame so the 
 - The frontend install needs `--legacy-peer-deps` (a `@react-three/fiber` peer range
   in Launchpad) and `--ignore-scripts` (a transitive `husky` prepare script). Both are
   pre-existing Launchpad quirks, unrelated to the plugin.
-- Ports: Strapi `1337`, Next `3000` by default. If `1337` is taken, change `PORT` and
-  `MCP_URL` in `strapi/.env` and `NEXT_PUBLIC_API_URL` in `next/.env.local` to match.
+- Ports: Strapi `1337`, Next `3000` by default. If `1337` is taken, change `PORT` in
+  `strapi/.env` and `NEXT_PUBLIC_API_URL` in `next/.env.local` to match.
+- **About the preview:** Strapi's official Preview is configured in `strapi/config/admin.ts`
+  (the official mechanism + the `/api/preview` draft-mode route). The 🖼 side-by-side panel
+  the chat opens is the **plugin's own** iframe — *not* Strapi's official Live Preview
+  (a Growth/Enterprise feature) — so it works on Community too.
 
 ## What's added on top of Launchpad
 
