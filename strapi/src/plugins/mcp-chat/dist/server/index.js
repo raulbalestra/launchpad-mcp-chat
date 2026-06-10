@@ -411,7 +411,7 @@ var chat_default2 = ({ strapi }) => ({
         strapi.log.warn(`[mcp-chat] MCP "playwright" indispon\xEDvel: ${e?.message || e}`);
       }
     }
-    const tools = [
+    const tools2 = [
       ...localToolSpecs,
       ...mcpTools.map((t) => ({
         type: "function",
@@ -473,7 +473,7 @@ You also control a real browser via browser_* tools (Playwright), pointed at the
         model: MODEL,
         max_tokens: 2048,
         messages: convo,
-        ...tools.length > 0 ? { tools, tool_choice: "auto" } : {}
+        ...tools2.length > 0 ? { tools: tools2, tool_choice: "auto" } : {}
       });
       const msg = data.choices?.[0]?.message;
       if (!msg) throw new Error("OpenAI: resposta sem message.");
@@ -511,7 +511,7 @@ You also control a real browser via browser_* tools (Playwright), pointed at the
         model: MODEL,
         lang: language,
         didWrite,
-        toolsAvailable: tools.length
+        toolsAvailable: tools2.length
       };
     }
     return {
@@ -519,7 +519,7 @@ You also control a real browser via browser_* tools (Playwright), pointed at the
       model: MODEL,
       lang: language,
       didWrite,
-      toolsAvailable: tools.length
+      toolsAvailable: tools2.length
     };
   }
 });
@@ -586,78 +586,114 @@ var routes_default = {
   }
 };
 
-// server/src/mcp.ts
+// server/src/mcp/tools/buscar-texto.ts
 var import_utils = require("@strapi/utils");
-function registerMcpTools(strapi) {
-  const registerTool = strapi?.ai?.mcp?.registerTool;
-  if (typeof registerTool !== "function") {
+var tool = {
+  register(registerTool) {
+    registerTool({
+      name: "mcp_chat_buscar_texto",
+      title: "Search text across content (deep)",
+      description: 'Search a phrase across ALL content-types, single types, components and dynamic zones (recursive, substring). Returns matches with a `path` (e.g. ["dynamic_zone",2,"heading"]) to pass to mcp_chat_editar_campo.',
+      resolveInputSchema: () => import_utils.z.object({ termo: import_utils.z.string() }),
+      resolveOutputSchema: () => import_utils.z.object({
+        total: import_utils.z.number().optional(),
+        resultados: import_utils.z.array(import_utils.z.any()).optional(),
+        erro: import_utils.z.string().optional()
+      }),
+      auth: { policies: [{ action: "plugin::content-manager.explorer.read" }] },
+      createHandler: (strapi) => async ({ args }) => {
+        const r = await createContentTools(strapi).buscarTexto(args?.termo);
+        return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
+      }
+    });
+  }
+};
+var buscar_texto_default = tool;
+
+// server/src/mcp/tools/editar-campo.ts
+var import_utils2 = require("@strapi/utils");
+var tool2 = {
+  register(registerTool) {
+    registerTool({
+      name: "mcp_chat_editar_campo",
+      title: "Edit a (possibly nested) field",
+      description: "Edit a field value (saved as draft), including text nested in components/dynamic zones. Pass the `path` exactly as returned by mcp_chat_buscar_texto; for a simple top-level field you may use `campo`.",
+      resolveInputSchema: () => import_utils2.z.object({
+        uid: import_utils2.z.string(),
+        documentId: import_utils2.z.string(),
+        path: import_utils2.z.array(import_utils2.z.union([import_utils2.z.string(), import_utils2.z.number()])).optional(),
+        campo: import_utils2.z.string().optional(),
+        novo_valor: import_utils2.z.string()
+      }),
+      resolveOutputSchema: () => import_utils2.z.object({
+        ok: import_utils2.z.boolean().optional(),
+        uid: import_utils2.z.string().optional(),
+        documentId: import_utils2.z.string().optional(),
+        path: import_utils2.z.array(import_utils2.z.any()).optional(),
+        novo_valor: import_utils2.z.string().optional(),
+        erro: import_utils2.z.string().optional()
+      }),
+      auth: { policies: [{ action: "plugin::content-manager.explorer.update" }] },
+      createHandler: (strapi) => async ({ args }) => {
+        const r = await createContentTools(strapi).editarCampo(args);
+        return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
+      }
+    });
+  }
+};
+var editar_campo_default = tool2;
+
+// server/src/mcp/tools/publicar.ts
+var import_utils3 = require("@strapi/utils");
+var tool3 = {
+  register(registerTool) {
+    registerTool({
+      name: "mcp_chat_publicar",
+      title: "Publish an entry",
+      description: "Publish an entry by uid + documentId, making the change visible on the site.",
+      resolveInputSchema: () => import_utils3.z.object({ uid: import_utils3.z.string(), documentId: import_utils3.z.string() }),
+      resolveOutputSchema: () => import_utils3.z.object({
+        ok: import_utils3.z.boolean().optional(),
+        uid: import_utils3.z.string().optional(),
+        documentId: import_utils3.z.string().optional(),
+        status: import_utils3.z.string().optional()
+      }),
+      auth: { policies: [{ action: "plugin::content-manager.explorer.publish" }] },
+      createHandler: (strapi) => async ({ args }) => {
+        const r = await createContentTools(strapi).publicar(args);
+        return { content: [{ type: "text", text: JSON.stringify(r) }], structuredContent: r };
+      }
+    });
+  }
+};
+var publicar_default = tool3;
+
+// server/src/mcp/tools/index.ts
+var tools = [buscar_texto_default, editar_campo_default, publicar_default];
+
+// server/src/mcp/index.ts
+var registerMcpTools = (strapi) => {
+  const mcp = strapi?.ai?.mcp;
+  const enabled = typeof mcp?.isEnabled === "function" ? mcp.isEnabled() : !!mcp?.registerTool;
+  if (!mcp || typeof mcp.registerTool !== "function" || !enabled) {
     strapi.log.warn(
-      "[mcp-chat] strapi.ai.mcp.registerTool indispon\xEDvel \u2014 tools N\xC3O registradas no MCP nativo. Requer Strapi >= 5.47.0 com `mcp: { enabled: true }` em config/server."
+      "[mcp-chat] MCP nativo indispon\xEDvel/desligado \u2014 tools N\xC3O registradas. Requer Strapi >= 5.47.0 com `mcp: { enabled: true }` em config/server."
     );
     return;
   }
-  const tools = createContentTools(strapi);
-  const asResult = (r) => ({
-    content: [{ type: "text", text: JSON.stringify(r) }],
-    structuredContent: r
-  });
-  registerTool({
-    name: "mcp_chat_buscar_texto",
-    title: "Search text across content (deep)",
-    description: 'Search a phrase across ALL content-types, single types, components and dynamic zones (recursive, substring). Returns matches with a `path` (e.g. ["dynamic_zone",2,"heading"]) to pass to mcp_chat_editar_campo.',
-    resolveInputSchema: () => import_utils.z.object({ termo: import_utils.z.string() }),
-    resolveOutputSchema: () => import_utils.z.object({
-      total: import_utils.z.number().optional(),
-      resultados: import_utils.z.array(import_utils.z.any()).optional(),
-      erro: import_utils.z.string().optional()
-    }),
-    auth: { policies: [{ action: "plugin::content-manager.explorer.read" }] },
-    createHandler: () => async ({ args }) => asResult(await tools.buscarTexto(args?.termo))
-  });
-  registerTool({
-    name: "mcp_chat_editar_campo",
-    title: "Edit a (possibly nested) field",
-    description: "Edit a field value (saved as draft), including text nested in components/dynamic zones. Pass the `path` exactly as returned by mcp_chat_buscar_texto; for a simple top-level field you may use `campo`.",
-    resolveInputSchema: () => import_utils.z.object({
-      uid: import_utils.z.string(),
-      documentId: import_utils.z.string(),
-      path: import_utils.z.array(import_utils.z.union([import_utils.z.string(), import_utils.z.number()])).optional(),
-      campo: import_utils.z.string().optional(),
-      novo_valor: import_utils.z.string()
-    }),
-    resolveOutputSchema: () => import_utils.z.object({
-      ok: import_utils.z.boolean().optional(),
-      uid: import_utils.z.string().optional(),
-      documentId: import_utils.z.string().optional(),
-      path: import_utils.z.array(import_utils.z.any()).optional(),
-      novo_valor: import_utils.z.string().optional(),
-      erro: import_utils.z.string().optional()
-    }),
-    auth: { policies: [{ action: "plugin::content-manager.explorer.update" }] },
-    createHandler: () => async ({ args }) => asResult(await tools.editarCampo(args))
-  });
-  registerTool({
-    name: "mcp_chat_publicar",
-    title: "Publish an entry",
-    description: "Publish an entry by uid + documentId, making the change visible on the site.",
-    resolveInputSchema: () => import_utils.z.object({ uid: import_utils.z.string(), documentId: import_utils.z.string() }),
-    resolveOutputSchema: () => import_utils.z.object({
-      ok: import_utils.z.boolean().optional(),
-      uid: import_utils.z.string().optional(),
-      documentId: import_utils.z.string().optional(),
-      status: import_utils.z.string().optional()
-    }),
-    auth: { policies: [{ action: "plugin::content-manager.explorer.publish" }] },
-    createHandler: () => async ({ args }) => asResult(await tools.publicar(args))
-  });
-  strapi.log.info("[mcp-chat] 3 tools registradas no MCP nativo (mcp_chat_*).");
-}
+  const { registerTool } = mcp;
+  for (const tool4 of tools) tool4.register(registerTool, strapi);
+  strapi.log.info(`[mcp-chat] ${tools.length} tools registradas no MCP nativo (mcp_chat_*).`);
+};
+
+// server/src/register.ts
+var register_default = ({ strapi }) => {
+  registerMcpTools(strapi);
+};
 
 // server/src/index.ts
 var index_default = {
-  register({ strapi }) {
-    registerMcpTools(strapi);
-  },
+  register: register_default,
   bootstrap() {
   },
   destroy() {
