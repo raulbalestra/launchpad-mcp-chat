@@ -142,6 +142,202 @@ var McpClient = class {
   }
 };
 
+// server/src/content-tools.ts
+var TEXTUAL = ["string", "text", "richtext"];
+function createContentTools(strapi) {
+  const apiContentTypes = () => Object.values(strapi.contentTypes).filter(
+    (ct) => ct.uid?.startsWith("api::")
+  );
+  const attrsOf = (uid) => strapi.contentTypes?.[uid]?.attributes || strapi.components?.[uid]?.attributes || {};
+  const buildPopulate = (attributes, seen = /* @__PURE__ */ new Set()) => {
+    const populate = {};
+    for (const [name, a] of Object.entries(attributes)) {
+      if (a.type === "component" && a.component) {
+        const sub = seen.has(a.component) ? {} : buildPopulate(attrsOf(a.component), new Set(seen).add(a.component));
+        populate[name] = Object.keys(sub).length ? { populate: sub } : true;
+      } else if (a.type === "dynamiczone") {
+        const on = {};
+        for (const comp of a.components || []) {
+          const sub = seen.has(comp) ? {} : buildPopulate(attrsOf(comp), new Set(seen).add(comp));
+          on[comp] = Object.keys(sub).length ? { populate: sub } : true;
+        }
+        populate[name] = { on };
+      } else if (a.type === "media" || a.type === "relation") {
+        populate[name] = true;
+      }
+    }
+    return populate;
+  };
+  const walkFind = (node, attributes, basePath, needle, collect) => {
+    if (!node || typeof node !== "object") return;
+    for (const [name, a] of Object.entries(attributes)) {
+      const v = node[name];
+      if (v == null) continue;
+      const path = [...basePath, name];
+      if (TEXTUAL.includes(a.type)) {
+        if (typeof v === "string" && v.toLowerCase().includes(needle)) {
+          collect(path, name, v);
+        }
+      } else if (a.type === "component" && a.component) {
+        const sub = attrsOf(a.component);
+        if (a.repeatable && Array.isArray(v)) {
+          v.forEach((item, i) => walkFind(item, sub, [...path, i], needle, collect));
+        } else {
+          walkFind(v, sub, path, needle, collect);
+        }
+      } else if (a.type === "dynamiczone" && Array.isArray(v)) {
+        v.forEach((item, i) => {
+          if (item?.__component) {
+            walkFind(item, attrsOf(item.__component), [...path, i], needle, collect);
+          }
+        });
+      }
+    }
+  };
+  const buscarTexto = async (termo) => {
+    const needle = String(termo || "").toLowerCase().trim();
+    if (!needle) return { erro: "termo vazio" };
+    const matches = [];
+    for (const ct of apiContentTypes()) {
+      const attributes = ct.attributes || {};
+      const populate = buildPopulate(attributes);
+      let entries = [];
+      try {
+        const res = await strapi.documents(ct.uid).findMany({ status: "draft", populate, limit: 200 });
+        entries = Array.isArray(res) ? res : res ? [res] : [];
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        walkFind(e, attributes, [], needle, (path, campo, valor) => {
+          matches.push({
+            uid: ct.uid,
+            tipo: ct.info?.displayName || ct.uid,
+            documentId: e.documentId,
+            path,
+            campo,
+            valor_atual: valor.length > 300 ? valor.slice(0, 300) + "\u2026" : valor
+          });
+        });
+      }
+    }
+    return { total: matches.length, resultados: matches };
+  };
+  const sanitizeNode = (node, attributes) => {
+    if (node == null) return node;
+    const out = {};
+    if (node.id != null) out.id = node.id;
+    for (const [name, a] of Object.entries(attributes)) {
+      const v = node[name];
+      if (v === void 0) continue;
+      out[name] = sanitizeAttr(v, a);
+    }
+    return out;
+  };
+  const sanitizeAttr = (value, a) => {
+    if (value == null) return value;
+    if (a.type === "component" && a.component) {
+      const sub = attrsOf(a.component);
+      return a.repeatable && Array.isArray(value) ? value.map((it) => sanitizeNode(it, sub)) : sanitizeNode(value, sub);
+    }
+    if (a.type === "dynamiczone" && Array.isArray(value)) {
+      return value.map((it) => ({
+        __component: it.__component,
+        ...sanitizeNode(it, attrsOf(it.__component))
+      }));
+    }
+    if (a.type === "media") {
+      return Array.isArray(value) ? value.map((m) => m?.id).filter(Boolean) : value?.id ?? null;
+    }
+    if (a.type === "relation") {
+      return Array.isArray(value) ? value.map((r) => r?.id).filter(Boolean) : value?.id ?? null;
+    }
+    return value;
+  };
+  const editarCampo = async ({ uid, documentId, path, campo, novo_valor }) => {
+    const p = Array.isArray(path) && path.length ? path : campo ? [campo] : null;
+    if (!p) return { erro: 'informe "path" (array) ou "campo"' };
+    const attributes = strapi.contentTypes?.[uid]?.attributes || {};
+    const topAttr = p[0];
+    const ad = attributes[topAttr];
+    if (p.length === 1 && ad && TEXTUAL.includes(ad.type)) {
+      const updated2 = await strapi.documents(uid).update({ documentId, data: { [topAttr]: novo_valor } });
+      return { ok: true, uid, documentId: updated2?.documentId || documentId, path: p, novo_valor };
+    }
+    const populate = buildPopulate(attributes);
+    const entry = await strapi.documents(uid).findOne({ documentId, status: "draft", populate });
+    if (!entry) return { erro: "entrada n\xE3o encontrada" };
+    let cur = entry;
+    for (let i = 0; i < p.length - 1; i++) {
+      if (cur == null) break;
+      cur = cur[p[i]];
+    }
+    if (cur == null) return { erro: `caminho inv\xE1lido: ${p.join(".")}` };
+    cur[p[p.length - 1]] = novo_valor;
+    const data = { [topAttr]: sanitizeAttr(entry[topAttr], ad) };
+    const updated = await strapi.documents(uid).update({ documentId, data });
+    return { ok: true, uid, documentId: updated?.documentId || documentId, path: p, novo_valor };
+  };
+  const publicar = async ({ uid, documentId }) => {
+    await strapi.documents(uid).publish({ documentId });
+    return { ok: true, uid, documentId, status: "published" };
+  };
+  return { buscarTexto, editarCampo, publicar };
+}
+var openAiToolSpecs = [
+  {
+    type: "function",
+    function: {
+      name: "buscar_texto",
+      description: 'Procura uma palavra/frase em TODOS os content-types, single types, COMPONENTES e DYNAMIC ZONES do Strapi (substring, recursivo). Cada resultado traz uid, documentId, "path" (ex.: ["dynamic_zone",2,"heading"]), campo e valor_atual. Passe esse "path" para editar_campo.',
+      parameters: {
+        type: "object",
+        properties: {
+          termo: {
+            type: "string",
+            description: 'trecho distintivo do texto a localizar; N\xC3O inclua r\xF3tulos de status do preview, como "(Draft)"/"(Rascunho)"'
+          }
+        },
+        required: ["termo"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "editar_campo",
+      description: 'Altera o valor de um campo (salva como rascunho). Use o "path" retornado por buscar_texto para campos aninhados; para campo simples no topo, pode usar "campo".',
+      parameters: {
+        type: "object",
+        properties: {
+          uid: { type: "string" },
+          documentId: { type: "string" },
+          path: {
+            type: "array",
+            description: "caminho at\xE9 o campo, exatamente como veio de buscar_texto",
+            items: { type: ["string", "number"] }
+          },
+          campo: { type: "string", description: "alternativa ao path (campo simples no topo)" },
+          novo_valor: { type: "string" }
+        },
+        required: ["uid", "documentId", "novo_valor"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "publicar",
+      description: "Publica a entrada (torna a altera\xE7\xE3o vis\xEDvel no site p\xFAblico).",
+      parameters: {
+        type: "object",
+        properties: { uid: { type: "string" }, documentId: { type: "string" } },
+        required: ["uid", "documentId"]
+      }
+    }
+  }
+];
+
 // server/src/services/chat.ts
 var MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o";
 var MAX_TURNS = 10;
@@ -149,9 +345,7 @@ var OPENAI_URL = "https://api.openai.com/v1/chat/completions";
 var SYSTEM = {
   pt: `Voc\xEA \xE9 um assistente embutido no admin do Strapi 5 deste projeto. Voc\xEA N\xC3O \xE9 s\xF3 um guia: voc\xEA consegue EDITAR e PUBLICAR conte\xFAdo de verdade atrav\xE9s das ferramentas.
 
-Ferramentas de LEITURA (MCP) descrevem content-types, componentes, servi\xE7os e info da inst\xE2ncia \u2014 use para entender a estrutura.
-
-Ferramentas de ESCRITA:
+Ferramentas de conte\xFAdo:
 - buscar_texto({termo}): procura uma palavra ou frase em TODOS os content-types, single types, COMPONENTES e DYNAMIC ZONES (recursivo, por substring). Retorna uma lista; cada item tem uid, documentId, "path" (caminho at\xE9 o campo, ex.: ["dynamic_zone",2,"heading"]), campo e valor_atual. Use SEMPRE isto primeiro \u2014 N\xC3O pe\xE7a ao usu\xE1rio onde est\xE1, ache sozinho. Busque um trecho distintivo e N\xC3O inclua r\xF3tulos que o preview adiciona, como "(Draft)"/"(Rascunho)".
 - editar_campo({uid, documentId, path, novo_valor}): troca o valor de um campo (salva como rascunho). Passe o "path" EXATAMENTE como veio de buscar_texto.
 - publicar({uid, documentId}): publica a entrada, deixando a mudan\xE7a vis\xEDvel no site.
@@ -168,9 +362,7 @@ Se o usu\xE1rio compartilhar a tela, uma imagem \xE9 anexada \xE0 \xFAltima mens
 Seja objetivo e acion\xE1vel. Responda SEMPRE em portugu\xEAs.`,
   en: `You are an assistant embedded in this project's Strapi 5 admin. You are NOT just a guide: you can actually EDIT and PUBLISH content through your tools.
 
-READ tools (MCP) describe content-types, components, services and instance info \u2014 use them to understand the structure.
-
-WRITE tools:
+Content tools:
 - buscar_texto({termo}): searches a word or phrase across ALL content-types, single types, COMPONENTS and DYNAMIC ZONES (recursive, substring). Returns a list; each item has uid, documentId, "path" (the path to the field, e.g. ["dynamic_zone",2,"heading"]), field and current value. ALWAYS use this first \u2014 do NOT ask the user where it is, find it yourself. Search a distinctive snippet and do NOT include labels the preview adds, like "(Draft)".
 - editar_campo({uid, documentId, path, novo_valor}): replaces a field value (saved as draft). Pass the "path" EXACTLY as returned by buscar_texto.
 - publicar({uid, documentId}): publishes the entry, making the change visible on the site.
@@ -195,220 +387,18 @@ var chat_default2 = ({ strapi }) => ({
       );
     }
     const language = lang === "en" ? "en" : "pt";
-    const apiContentTypes = () => Object.values(strapi.contentTypes).filter(
-      (ct) => ct.uid?.startsWith("api::")
-    );
-    const TEXTUAL = ["string", "text", "richtext"];
-    const attrsOf = (uid) => strapi.contentTypes?.[uid]?.attributes || strapi.components?.[uid]?.attributes || {};
-    const buildPopulate = (attributes, seen = /* @__PURE__ */ new Set()) => {
-      const populate = {};
-      for (const [name, a] of Object.entries(attributes)) {
-        if (a.type === "component" && a.component) {
-          const sub = seen.has(a.component) ? {} : buildPopulate(attrsOf(a.component), new Set(seen).add(a.component));
-          populate[name] = Object.keys(sub).length ? { populate: sub } : true;
-        } else if (a.type === "dynamiczone") {
-          const on = {};
-          for (const comp of a.components || []) {
-            const sub = seen.has(comp) ? {} : buildPopulate(attrsOf(comp), new Set(seen).add(comp));
-            on[comp] = Object.keys(sub).length ? { populate: sub } : true;
-          }
-          populate[name] = { on };
-        } else if (a.type === "media" || a.type === "relation") {
-          populate[name] = true;
-        }
-      }
-      return populate;
-    };
-    const walkFind = (node, attributes, basePath, needle, collect) => {
-      if (!node || typeof node !== "object") return;
-      for (const [name, a] of Object.entries(attributes)) {
-        const v = node[name];
-        if (v == null) continue;
-        const path = [...basePath, name];
-        if (TEXTUAL.includes(a.type)) {
-          if (typeof v === "string" && v.toLowerCase().includes(needle)) {
-            collect(path, name, v);
-          }
-        } else if (a.type === "component" && a.component) {
-          const sub = attrsOf(a.component);
-          if (a.repeatable && Array.isArray(v)) {
-            v.forEach((item, i) => walkFind(item, sub, [...path, i], needle, collect));
-          } else {
-            walkFind(v, sub, path, needle, collect);
-          }
-        } else if (a.type === "dynamiczone" && Array.isArray(v)) {
-          v.forEach((item, i) => {
-            if (item?.__component) {
-              walkFind(item, attrsOf(item.__component), [...path, i], needle, collect);
-            }
-          });
-        }
-      }
-    };
-    const buscarTexto = async (termo) => {
-      const needle = String(termo || "").toLowerCase().trim();
-      if (!needle) return { erro: "termo vazio" };
-      const matches = [];
-      for (const ct of apiContentTypes()) {
-        const attributes = ct.attributes || {};
-        const populate = buildPopulate(attributes);
-        let entries = [];
-        try {
-          const res = await strapi.documents(ct.uid).findMany({ status: "draft", populate, limit: 200 });
-          entries = Array.isArray(res) ? res : res ? [res] : [];
-        } catch {
-          continue;
-        }
-        for (const e of entries) {
-          walkFind(e, attributes, [], needle, (path, campo, valor) => {
-            matches.push({
-              uid: ct.uid,
-              tipo: ct.info?.displayName || ct.uid,
-              documentId: e.documentId,
-              path,
-              campo,
-              valor_atual: valor.length > 300 ? valor.slice(0, 300) + "\u2026" : valor
-            });
-          });
-        }
-      }
-      return { total: matches.length, resultados: matches };
-    };
-    const sanitizeNode = (node, attributes) => {
-      if (node == null) return node;
-      const out = {};
-      if (node.id != null) out.id = node.id;
-      for (const [name, a] of Object.entries(attributes)) {
-        const v = node[name];
-        if (v === void 0) continue;
-        out[name] = sanitizeAttr(v, a);
-      }
-      return out;
-    };
-    const sanitizeAttr = (value, a) => {
-      if (value == null) return value;
-      if (a.type === "component" && a.component) {
-        const sub = attrsOf(a.component);
-        return a.repeatable && Array.isArray(value) ? value.map((it) => sanitizeNode(it, sub)) : sanitizeNode(value, sub);
-      }
-      if (a.type === "dynamiczone" && Array.isArray(value)) {
-        return value.map((it) => ({
-          __component: it.__component,
-          ...sanitizeNode(it, attrsOf(it.__component))
-        }));
-      }
-      if (a.type === "media") {
-        return Array.isArray(value) ? value.map((m) => m?.id).filter(Boolean) : value?.id ?? null;
-      }
-      if (a.type === "relation") {
-        return Array.isArray(value) ? value.map((r) => r?.id).filter(Boolean) : value?.id ?? null;
-      }
-      return value;
-    };
-    const editarCampo = async ({
-      uid,
-      documentId,
-      path,
-      campo,
-      novo_valor
-    }) => {
-      const p = Array.isArray(path) && path.length ? path : campo ? [campo] : null;
-      if (!p) return { erro: 'informe "path" (array) ou "campo"' };
-      const attributes = strapi.contentTypes?.[uid]?.attributes || {};
-      const topAttr = p[0];
-      const ad = attributes[topAttr];
-      if (p.length === 1 && ad && TEXTUAL.includes(ad.type)) {
-        const updated2 = await strapi.documents(uid).update({ documentId, data: { [topAttr]: novo_valor } });
-        return { ok: true, uid, documentId: updated2?.documentId || documentId, path: p, novo_valor };
-      }
-      const populate = buildPopulate(attributes);
-      const entry = await strapi.documents(uid).findOne({ documentId, status: "draft", populate });
-      if (!entry) return { erro: "entrada n\xE3o encontrada" };
-      let cur = entry;
-      for (let i = 0; i < p.length - 1; i++) {
-        if (cur == null) break;
-        cur = cur[p[i]];
-      }
-      if (cur == null) return { erro: `caminho inv\xE1lido: ${p.join(".")}` };
-      cur[p[p.length - 1]] = novo_valor;
-      const data = { [topAttr]: sanitizeAttr(entry[topAttr], ad) };
-      const updated = await strapi.documents(uid).update({ documentId, data });
-      return { ok: true, uid, documentId: updated?.documentId || documentId, path: p, novo_valor };
-    };
-    const publicar = async ({ uid, documentId }) => {
-      await strapi.documents(uid).publish({ documentId });
-      return { ok: true, uid, documentId, status: "published" };
-    };
+    const { buscarTexto, editarCampo, publicar } = createContentTools(strapi);
     const LOCAL_TOOLS = {
       buscar_texto: (a) => buscarTexto(a?.termo),
       editar_campo: (a) => editarCampo(a),
       publicar: (a) => publicar(a)
     };
-    const localToolSpecs = [
-      {
-        type: "function",
-        function: {
-          name: "buscar_texto",
-          description: 'Procura uma palavra/frase em TODOS os content-types, single types, COMPONENTES e DYNAMIC ZONES do Strapi (busca por substring, recursiva). Cada resultado traz uid, documentId, "path" (caminho at\xE9 o campo, ex.: ["dynamic_zone",2,"heading"]), campo e valor_atual. Passe esse mesmo "path" para editar_campo.',
-          parameters: {
-            type: "object",
-            properties: { termo: { type: "string", description: 'trecho distintivo do texto a localizar; N\xC3O inclua r\xF3tulos de status que o preview adiciona, como "(Draft)" ou "(Rascunho)"' } },
-            required: ["termo"]
-          }
-        }
-      },
-      {
-        type: "function",
-        function: {
-          name: "editar_campo",
-          description: 'Altera o valor de um campo de uma entrada (salva como rascunho). Use o "path" retornado por buscar_texto para campos aninhados em componentes/dynamic zones. Para um campo simples no topo, pode usar "campo".',
-          parameters: {
-            type: "object",
-            properties: {
-              uid: { type: "string" },
-              documentId: { type: "string" },
-              path: {
-                type: "array",
-                description: 'caminho at\xE9 o campo, exatamente como veio de buscar_texto (ex.: ["dynamic_zone",2,"heading"]). Strings s\xE3o nomes de campo; n\xFAmeros s\xE3o \xEDndices em arrays/dynamic zones.',
-                items: { type: ["string", "number"] }
-              },
-              campo: { type: "string", description: "alternativa ao path, s\xF3 para campo simples no topo do content-type" },
-              novo_valor: { type: "string" }
-            },
-            required: ["uid", "documentId", "novo_valor"]
-          }
-        }
-      },
-      {
-        type: "function",
-        function: {
-          name: "publicar",
-          description: "Publica a entrada (torna a altera\xE7\xE3o vis\xEDvel no site p\xFAblico).",
-          parameters: {
-            type: "object",
-            properties: { uid: { type: "string" }, documentId: { type: "string" } },
-            required: ["uid", "documentId"]
-          }
-        }
-      }
-    ];
+    const localToolSpecs = openAiToolSpecs;
     const mcpByTool = {};
     const mcpTools = [];
-    const mcpSources = [
-      // URL default (/mcp nativo); token de admin exigido pelo MCP nativo.
-      { name: "strapi", token: process.env.STRAPI_ADMIN_TOKEN }
-    ];
     if (process.env.PLAYWRIGHT_MCP_URL) {
-      mcpSources.push({ url: process.env.PLAYWRIGHT_MCP_URL, name: "playwright" });
-    }
-    if (!process.env.STRAPI_ADMIN_TOKEN) {
-      strapi.log.warn(
-        "[mcp-chat] STRAPI_ADMIN_TOKEN n\xE3o definido \u2014 o MCP nativo (/mcp) exige um admin token. O chat seguir\xE1 com as ferramentas locais (buscar_texto/editar_campo/publicar). Crie um admin token no painel e adicione STRAPI_ADMIN_TOKEN ao .env para habilitar as tools do MCP."
-      );
-    }
-    for (const src of mcpSources) {
       try {
-        const client = new McpClient(src.url, src.name, src.token);
+        const client = new McpClient(process.env.PLAYWRIGHT_MCP_URL, "playwright");
         await client.init();
         const list = await client.listTools();
         for (const t of list) {
@@ -416,11 +406,9 @@ var chat_default2 = ({ strapi }) => ({
           mcpByTool[t.name] = client;
           mcpTools.push(t);
         }
-        strapi.log.info(`[mcp-chat] MCP "${src.name}" ok: ${list.length} tools`);
+        strapi.log.info(`[mcp-chat] MCP "playwright" ok: ${list.length} tools`);
       } catch (e) {
-        strapi.log.warn(
-          `[mcp-chat] MCP "${src.name}" indispon\xEDvel: ${e?.message || e}`
-        );
+        strapi.log.warn(`[mcp-chat] MCP "playwright" indispon\xEDvel: ${e?.message || e}`);
       }
     }
     const tools = [
@@ -598,9 +586,77 @@ var routes_default = {
   }
 };
 
+// server/src/mcp.ts
+var import_utils = require("@strapi/utils");
+function registerMcpTools(strapi) {
+  const registerTool = strapi?.ai?.mcp?.registerTool;
+  if (typeof registerTool !== "function") {
+    strapi.log.warn(
+      "[mcp-chat] strapi.ai.mcp.registerTool indispon\xEDvel \u2014 tools N\xC3O registradas no MCP nativo. Requer Strapi >= 5.47.0 com `mcp: { enabled: true }` em config/server."
+    );
+    return;
+  }
+  const tools = createContentTools(strapi);
+  const asResult = (r) => ({
+    content: [{ type: "text", text: JSON.stringify(r) }],
+    structuredContent: r
+  });
+  registerTool({
+    name: "mcp_chat_buscar_texto",
+    title: "Search text across content (deep)",
+    description: 'Search a phrase across ALL content-types, single types, components and dynamic zones (recursive, substring). Returns matches with a `path` (e.g. ["dynamic_zone",2,"heading"]) to pass to mcp_chat_editar_campo.',
+    resolveInputSchema: () => import_utils.z.object({ termo: import_utils.z.string() }),
+    resolveOutputSchema: () => import_utils.z.object({
+      total: import_utils.z.number().optional(),
+      resultados: import_utils.z.array(import_utils.z.any()).optional(),
+      erro: import_utils.z.string().optional()
+    }),
+    auth: { policies: [{ action: "plugin::content-manager.explorer.read" }] },
+    createHandler: () => async ({ args }) => asResult(await tools.buscarTexto(args?.termo))
+  });
+  registerTool({
+    name: "mcp_chat_editar_campo",
+    title: "Edit a (possibly nested) field",
+    description: "Edit a field value (saved as draft), including text nested in components/dynamic zones. Pass the `path` exactly as returned by mcp_chat_buscar_texto; for a simple top-level field you may use `campo`.",
+    resolveInputSchema: () => import_utils.z.object({
+      uid: import_utils.z.string(),
+      documentId: import_utils.z.string(),
+      path: import_utils.z.array(import_utils.z.union([import_utils.z.string(), import_utils.z.number()])).optional(),
+      campo: import_utils.z.string().optional(),
+      novo_valor: import_utils.z.string()
+    }),
+    resolveOutputSchema: () => import_utils.z.object({
+      ok: import_utils.z.boolean().optional(),
+      uid: import_utils.z.string().optional(),
+      documentId: import_utils.z.string().optional(),
+      path: import_utils.z.array(import_utils.z.any()).optional(),
+      novo_valor: import_utils.z.string().optional(),
+      erro: import_utils.z.string().optional()
+    }),
+    auth: { policies: [{ action: "plugin::content-manager.explorer.update" }] },
+    createHandler: () => async ({ args }) => asResult(await tools.editarCampo(args))
+  });
+  registerTool({
+    name: "mcp_chat_publicar",
+    title: "Publish an entry",
+    description: "Publish an entry by uid + documentId, making the change visible on the site.",
+    resolveInputSchema: () => import_utils.z.object({ uid: import_utils.z.string(), documentId: import_utils.z.string() }),
+    resolveOutputSchema: () => import_utils.z.object({
+      ok: import_utils.z.boolean().optional(),
+      uid: import_utils.z.string().optional(),
+      documentId: import_utils.z.string().optional(),
+      status: import_utils.z.string().optional()
+    }),
+    auth: { policies: [{ action: "plugin::content-manager.explorer.publish" }] },
+    createHandler: () => async ({ args }) => asResult(await tools.publicar(args))
+  });
+  strapi.log.info("[mcp-chat] 3 tools registradas no MCP nativo (mcp_chat_*).");
+}
+
 // server/src/index.ts
 var index_default = {
-  register() {
+  register({ strapi }) {
+    registerMcpTools(strapi);
   },
   bootstrap() {
   },

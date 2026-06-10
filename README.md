@@ -45,18 +45,14 @@ npm run seed      # imports the Launchpad content (products, blog, pages…)
 npm run develop   # http://localhost:1337/admin
 ```
 
-Create your admin user at `http://localhost:1337/admin`.
+Create your admin user at `http://localhost:1337/admin`. That's it — the chat works
+right away (the plugin registers its tools into the native MCP server and calls them
+in-process; no admin token needed).
 
-### Enable the AI tools (Admin token)
-
-The chat edits content through Strapi's **native MCP server** (already enabled in
-`strapi/config/server.ts`), which authenticates with an **Admin token**:
-
-1. In the admin, go to **Settings → Admin Tokens** and create a token.
-2. Put it in `strapi/.env` as `STRAPI_ADMIN_TOKEN=...` and restart `npm run develop`.
-
-Without the token the chat still works using its built-in content tools; the token
-unlocks the native MCP tools (scoped to that token's permissions).
+> **Want to use the tools from an external MCP client** (e.g. Cursor)? They're
+> exposed at `/mcp` (native MCP is enabled in `strapi/config/server.ts`). External
+> clients authenticate with an **Admin token** (Settings → Admin Tokens). The in-admin
+> chat doesn't need it.
 
 ### 2. Frontend (Next.js) — `next/`
 
