@@ -1,0 +1,12 @@
+.DS_Store
+*.log
+# segredos / ambiente (reforço — subpastas tambem ignoram)
+**/.env
+**/.env.*
+!**/.env.example
+# dependencias e dados locais
+**/node_modules/
+strapi/.tmp/
+strapi/dist/
+strapi/build/
+next/.next/
