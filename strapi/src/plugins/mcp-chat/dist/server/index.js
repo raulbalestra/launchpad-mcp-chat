@@ -73,7 +73,7 @@ var audio_default = ({ strapi }) => ({
 });
 
 // server/src/mcp-client.ts
-var MCP_URL = process.env.MCP_URL || "http://localhost:1337/api/mcp/streamable";
+var MCP_URL = process.env.MCP_URL || "http://localhost:1337/mcp";
 var baseHeaders = {
   "Content-Type": "application/json",
   Accept: "application/json, text/event-stream"
@@ -85,22 +85,25 @@ var parseSse = (text) => {
 };
 var McpClient = class {
   /**
-   * @param url  endpoint MCP streamable. Default: o MCP da própria Strapi.
-   * @param name rótulo p/ logs (ex.: 'strapi', 'playwright').
+   * @param url   endpoint MCP streamable. Default: o /mcp nativo da Strapi.
+   * @param name  rótulo p/ logs (ex.: 'strapi', 'playwright').
+   * @param token Bearer token (admin token, exigido pelo /mcp nativo).
    */
-  constructor(url = MCP_URL, name = "strapi") {
+  constructor(url = MCP_URL, name = "strapi", token) {
     this.url = url;
     this.name = name;
+    this.token = token;
   }
   headers() {
     const h = { ...baseHeaders };
+    if (this.token) h["Authorization"] = `Bearer ${this.token}`;
     if (this.sessionId) h["mcp-session-id"] = this.sessionId;
     return h;
   }
   async init() {
     const res = await fetch(this.url, {
       method: "POST",
-      headers: baseHeaders,
+      headers: this.headers(),
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
@@ -392,15 +395,20 @@ var chat_default2 = ({ strapi }) => ({
     const mcpByTool = {};
     const mcpTools = [];
     const mcpSources = [
-      { name: "strapi" }
-      // URL default (MCP da própria Strapi)
+      // URL default (/mcp nativo); token de admin exigido pelo MCP nativo.
+      { name: "strapi", token: process.env.STRAPI_ADMIN_TOKEN }
     ];
     if (process.env.PLAYWRIGHT_MCP_URL) {
       mcpSources.push({ url: process.env.PLAYWRIGHT_MCP_URL, name: "playwright" });
     }
+    if (!process.env.STRAPI_ADMIN_TOKEN) {
+      strapi.log.warn(
+        "[mcp-chat] STRAPI_ADMIN_TOKEN n\xE3o definido \u2014 o MCP nativo (/mcp) exige um admin token. O chat seguir\xE1 com as ferramentas locais (buscar_texto/editar_campo/publicar). Crie um admin token no painel e adicione STRAPI_ADMIN_TOKEN ao .env para habilitar as tools do MCP."
+      );
+    }
     for (const src of mcpSources) {
       try {
-        const client = new McpClient(src.url, src.name);
+        const client = new McpClient(src.url, src.name, src.token);
         await client.init();
         const list = await client.listTools();
         for (const t of list) {

@@ -47,6 +47,17 @@ npm run develop   # http://localhost:1337/admin
 
 Create your admin user at `http://localhost:1337/admin`.
 
+### Enable the AI tools (Admin token)
+
+The chat edits content through Strapi's **native MCP server** (already enabled in
+`strapi/config/server.ts`), which authenticates with an **Admin token**:
+
+1. In the admin, go to **Settings → Admin Tokens** and create a token.
+2. Put it in `strapi/.env` as `STRAPI_ADMIN_TOKEN=...` and restart `npm run develop`.
+
+Without the token the chat still works using its built-in content tools; the token
+unlocks the native MCP tools (scoped to that token's permissions).
+
 ### 2. Frontend (Next.js) — `next/`
 
 ```bash
@@ -83,7 +94,8 @@ You can also use voice (🎤) and screen sharing (the chat sends a frame so the 
 ## What's added on top of Launchpad
 
 - `strapi/src/plugins/mcp-chat/` — the plugin (vendored here so you can clone & run).
-- `strapi/config/plugins.ts` — enables `mcp` + `mcp-chat`.
+- `strapi/config/server.ts` — enables Strapi's native MCP server (`/mcp`).
+- `strapi/config/plugins.ts` — enables `mcp-chat`.
 - `strapi/config/middlewares.ts` — raises body limit (screenshots) + iframe CSP.
 - `next/components/preview-bridge.tsx` — keeps the preview on the same page + scroll after edits.
 
@@ -91,4 +103,4 @@ You can also use voice (🎤) and screen sharing (the chat sends a frame so the 
 
 - Plugin: [strapi-plugin-mcp-chat](https://github.com/raulbalestra/strapi-plugin-mcp-chat) (MIT)
 - Base app: [Strapi Launchpad](https://github.com/strapi/launchpad)
-- MCP server: [@sensinum/strapi-plugin-mcp](https://www.npmjs.com/package/@sensinum/strapi-plugin-mcp)
+- MCP server: Strapi's [native MCP server](https://docs.strapi.io/cms/features/strapi-mcp-server) (built-in, Strapi ≥ 5.47.0)

@@ -21,7 +21,6 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@sensinum/strapi-plugin-mcp": "^1.1.0",
     "@strapi/plugin-cloud": "5.47.1",
     "@strapi/plugin-seo": "^2.0.4",
     "@strapi/plugin-users-permissions": "5.47.1",
@@ -33,11 +32,6 @@
     "react-router-dom": "^6.0.0",
     "styled-components": "^6.0.0",
     "uuid": "^10.0.0"
-  },
-  "overrides": {
-    "@sensinum/strapi-plugin-mcp": {
-      "@modelcontextprotocol/sdk": "1.18.0"
-    }
   },
   "author": {
     "name": "A Strapi developer"
